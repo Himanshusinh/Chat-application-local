@@ -1,0 +1,98 @@
+# Every push to main builds OfficeChat for Windows and macOS and publishes a
+# GitHub Release. Installed apps see the new version within a few hours (or
+# immediately via Settings › Check for updates) and update themselves.
+#
+# Version = contents of VERSION + "." + run number (e.g. 1.1.42).
+# Needs the repository secret UPDATE_SIGNING_KEY (see README › Releases).
+
+name: Build & release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      v: ${{ steps.v.outputs.v }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "v=$(tr -d '[:space:]' < VERSION).${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq nsis zip
+      - run: go run ./tools/mkicon web
+      - run: scripts/build-windows.sh "${{ needs.version.outputs.v }}" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            out/OfficeChat-Setup.exe
+            out/OfficeChat-Windows-Portable.zip
+            out/OfficeChat-windows-amd64.exe
+            out/OfficeChat-windows-arm64.exe
+
+  mac:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - run: go run ./tools/mkicon web
+      - run: scripts/build-mac.sh "${{ needs.version.outputs.v }}" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            out/OfficeChat.dmg
+            out/OfficeChat-mac.zip
+
+  release:
+    needs: [version, windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Sign update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          NOTES: ${{ github.event.head_commit.message }}
+          V: ${{ needs.version.outputs.v }}
+        run: |
+          go run ./tools/release manifest -version "$V" -dir out \
+            -base "https://github.com/${{ github.repository }}/releases/download/v$V" -notes "$NOTES"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ github.event.head_commit.message }}
+          V: ${{ needs.version.outputs.v }}
+        run: |
+          {
+            echo "$NOTES"
+            echo
+            echo "**Install:** Windows → \`OfficeChat-Setup.exe\` · Mac → \`OfficeChat.dmg\`"
+            echo "Already installed? OfficeChat updates itself automatically."
+          } > notes.md
+          gh release create "v$V" out/* --repo "${{ github.repository }}" \
+            --title "OfficeChat $V" --notes-file notes.md --latest

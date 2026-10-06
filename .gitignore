@@ -1,0 +1,6 @@
+dist/
+out/
+*.syso
+.DS_Store
+# Never commit the release signing key.
+*signing-key*
