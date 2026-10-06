@@ -22,25 +22,25 @@ concurrency:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       v: ${{ steps.v.outputs.v }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: v
         run: echo "v=$(tr -d '[:space:]' < VERSION).${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
   windows:
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: stable }
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq nsis zip
       - run: go run ./tools/mkicon web
       - run: scripts/build-windows.sh "${{ needs.version.outputs.v }}" out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
           path: |
@@ -53,12 +53,12 @@ jobs:
     needs: version
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: stable }
       - run: go run ./tools/mkicon web
       - run: scripts/build-mac.sh "${{ needs.version.outputs.v }}" out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: mac
           path: |
@@ -67,12 +67,12 @@ jobs:
 
   release:
     needs: [version, windows, mac]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: stable }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with: { path: out, merge-multiple: true }
       - name: Sign update manifest
         env:

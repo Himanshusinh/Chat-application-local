@@ -88,3 +88,6 @@ func goNativeMessage(s *C.char) { handleNativeMessage(C.GoString(s)) }
 
 //export goWillQuit
 func goWillQuit() { shutdown() }
+
+//export goWindowHidden
+func goWindowHidden() { go maybeAutoInstall() }

@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/binary"
+	"os"
 	"strconv"
 	"sync"
 	"unsafe"
@@ -25,6 +26,7 @@ var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
 	shell32  = windows.NewLazySystemDLL("shell32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 
 	pRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	pCreateWindowExW               = user32.NewProc("CreateWindowExW")
@@ -57,6 +59,7 @@ var (
 	pSetWindowPos                  = user32.NewProc("SetWindowPos")
 	pDwmSetWindowAttribute         = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmSetWindowAttribute")
 	pGetModuleHandleW              = kernel32.NewProc("GetModuleHandleW")
+	pCreateSolidBrush              = gdi32.NewProc("CreateSolidBrush")
 )
 
 const (
@@ -64,6 +67,7 @@ const (
 	wmMove          = 0x0003
 	wmSize          = 0x0005
 	wmActivate      = 0x0006
+	wmShowWindow    = 0x0018
 	wmClose         = 0x0010
 	wmNull          = 0x0000
 	wmLButtonUp     = 0x0202
@@ -73,6 +77,7 @@ const (
 	wmApp           = 0x8000
 	wmTray          = wmApp + 1
 	wmCall          = wmApp + 2
+	wmLayout        = wmApp + 3
 	ninBalloonClick = wmUser + 5
 
 	swHide        = 0
@@ -81,6 +86,7 @@ const (
 	sizeMinimized = 1
 
 	wsOverlappedWindow = 0x00CF0000
+	wsClipChildren     = 0x02000000 // keep the window brush from painting over WebView2
 	cwUseDefault       = 0x80000000
 
 	nimAdd        = 0
@@ -221,6 +227,21 @@ func setVisible(v bool) {
 	if changed && webview != nil {
 		webview.Eval("window.ocNative && ocNative.setVisible(" + strconv.FormatBool(v) + ")")
 	}
+	// A downloaded update installs itself once the window is out of the way.
+	if changed && !v {
+		go maybeAutoInstall()
+	}
+}
+
+// layoutWebView sizes the page to the window. WebView2 starts at 0×0 and
+// stays blank until this runs after the window is actually on screen.
+func layoutWebView() {
+	if webview == nil || webview.GetController() == nil {
+		return
+	}
+	_ = webview.Show()
+	webview.Resize()
+	_ = webview.NotifyParentWindowPositionChanged()
 }
 
 func trayIcon(op uintptr, fill func(*notifyIconData)) {
@@ -254,17 +275,19 @@ func balloon(title, body string) {
 }
 
 func showMain() {
+	if webview == nil {
+		openAppWindow(uiURL()) // no WebView2 runtime; don't leave a blank window up
+		return
+	}
 	if r, _, _ := pIsIconic.Call(mainHwnd); r != 0 {
 		pShowWindow.Call(mainHwnd, swRestore)
 	} else {
 		pShowWindow.Call(mainHwnd, swShow)
 	}
 	pSetForegroundWindow.Call(mainHwnd)
-	if webview != nil {
-		webview.Focus()
-	} else {
-		openAppWindow(uiURL()) // no WebView2 runtime
-	}
+	layoutWebView()
+	webview.Focus()
+	pPostMessageW.Call(mainHwnd, wmLayout, 0, 0)
 	setVisible(true)
 }
 
@@ -290,14 +313,19 @@ func trayMenu() {
 func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 	switch msg {
 	case wmSize:
-		if webview != nil {
-			webview.Resize()
-		}
+		layoutWebView()
 		if wparam == sizeMinimized {
 			setVisible(false)
 		} else if r, _, _ := pIsWindowVisible.Call(hwnd); r != 0 {
 			setVisible(true)
 		}
+		return 0
+	case wmShowWindow:
+		if wparam != 0 {
+			layoutWebView()
+		}
+	case wmLayout:
+		layoutWebView()
 		return 0
 	case wmMove:
 		if webview != nil {
@@ -354,11 +382,16 @@ func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 }
 
 func runUI(url string, hidden bool) {
+	// WebView2 otherwise decides a window that was hidden at creation is
+	// "occluded" and never paints, which is the all-white window.
+	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-features=CalculateNativeWinOcclusion")
 	pSetProcessDpiAwarenessContext.Call(^uintptr(3)) // PER_MONITOR_AWARE_V2 (-4); ignored on old Windows
 	inst, _, _ := pGetModuleHandleW.Call(0)
 	iconSmall = iconFromICO(32)
 	iconBig = iconFromICO(256)
 	cursor, _, _ := pLoadCursorW.Call(0, 32512) // IDC_ARROW
+	// #0d1015, the app's dark background, so a not-yet-painted window isn't white.
+	bg, _, _ := pCreateSolidBrush.Call(0x0015100D) // COLORREF 0x00BBGGRR
 	className := wstr("OfficeChatWindow")
 	wc := wndClassEx{
 		WndProc:    windows.NewCallback(wndProc),
@@ -366,7 +399,7 @@ func runUI(url string, hidden bool) {
 		Icon:       iconBig,
 		IconSm:     iconSmall,
 		Cursor:     cursor,
-		Background: 6, // COLOR_WINDOW+1 (white)
+		Background: bg,
 		ClassName:  className,
 	}
 	wc.Size = uint32(unsafe.Sizeof(wc))
@@ -387,32 +420,51 @@ func runUI(url string, hidden bool) {
 		x, y = (sw-w)/2, (sh-h)/2
 	}
 	mainHwnd, _, _ = pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(wstr(appName))),
-		wsOverlappedWindow, x, y, w, h, 0, 0, inst, 0)
+		wsOverlappedWindow|wsClipChildren, x, y, w, h, 0, 0, inst, 0)
 	addTray()
 
+	// The page is created against a window that already has a real size.
+	// Creating WebView2 on a hidden window leaves it stuck at 0×0 (white).
+	if !hidden {
+		pShowWindow.Call(mainHwnd, swShow)
+	}
+
 	if _, err := webviewloader.GetInstalledVersion(); err == nil {
+		_ = os.MkdirAll(dataDir+`\WebView2`, 0o755)
 		wv := edge.NewChromium()
 		wv.DataPath = dataDir + `\WebView2`
 		wv.MessageCallback = handleNativeMessage
 		wv.SetPermission(edge.CoreWebView2PermissionKindNotifications, edge.CoreWebView2PermissionStateDeny)
 		wv.SetPermission(edge.CoreWebView2PermissionKindClipboardRead, edge.CoreWebView2PermissionStateAllow)
+		webview = wv // so size messages during Embed can lay the page out
 		if wv.Embed(mainHwnd) {
-			webview = wv
 			if s, err := wv.GetSettings(); err == nil {
 				_ = s.PutAreDevToolsEnabled(false)
 				_ = s.PutIsStatusBarEnabled(false)
 				_ = s.PutIsZoomControlEnabled(false)
 			}
-			wv.Resize()
+			if ctrl := wv.GetController(); ctrl != nil {
+				if c2 := ctrl.GetICoreWebView2Controller2(); c2 != nil {
+					_ = c2.PutDefaultBackgroundColor(edge.COREWEBVIEW2_COLOR{A: 255, R: 0x0d, G: 0x10, B: 0x15})
+				}
+			}
+			layoutWebView()
 			wv.Navigate(url)
+			layoutWebView()
 		} else {
+			webview = nil
 			logger.Printf("WebView2 failed to start; using Edge window instead")
 		}
 	} else {
 		logger.Printf("WebView2 runtime not installed (%v); using Edge window instead", err)
 	}
 
-	if !hidden {
+	if webview == nil {
+		pShowWindow.Call(mainHwnd, swHide)
+		if !hidden {
+			openAppWindow(url)
+		}
+	} else if !hidden {
 		showMain()
 	}
 

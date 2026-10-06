@@ -106,6 +106,7 @@ static BOOL hasBundle(void) { return [[NSBundle mainBundle] bundleIdentifier] !=
   if (self.visible == v) return;
   self.visible = v;
   [self eval:[NSString stringWithFormat:@"window.ocNative && ocNative.setVisible(%@)", v ? @"true" : @"false"]];
+  if (!v) goWindowHidden(); // install a downloaded update once the window is closed
 }
 
 - (void)show {
