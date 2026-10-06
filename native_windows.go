@@ -169,6 +169,9 @@ var (
 
 	visMu   sync.Mutex
 	visible bool
+	// userOpened is set only when the user opens the window. Messages, tray
+	// balloons and a background update must not show it on their own.
+	userOpened bool
 )
 
 // onUI runs fn on the window thread (WebView2 may only be used there).
@@ -275,6 +278,7 @@ func balloon(title, body string) {
 }
 
 func showMain() {
+	userOpened = true
 	if webview == nil {
 		openAppWindow(uiURL()) // no WebView2 runtime; don't leave a blank window up
 		return
@@ -321,6 +325,10 @@ func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 		}
 		return 0
 	case wmShowWindow:
+		if wparam != 0 && !userOpened {
+			pShowWindow.Call(hwnd, swHide)
+			return 0
+		}
 		if wparam != 0 {
 			layoutWebView()
 		}
@@ -339,7 +347,9 @@ func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 			}
 		}
 	case wmClose:
-		// Keep running in the tray, like Teams/Slack.
+		// Keep running in the tray, like Teams/Slack. Stay hidden until the
+		// user opens it again.
+		userOpened = false
 		pShowWindow.Call(hwnd, swHide)
 		setVisible(false)
 		if !trayHinted {
@@ -419,6 +429,7 @@ func runUI(url string, hidden bool) {
 	if sw > w && sh > h {
 		x, y = (sw-w)/2, (sh-h)/2
 	}
+	userOpened = !hidden
 	mainHwnd, _, _ = pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(wstr(appName))),
 		wsOverlappedWindow|wsClipChildren, x, y, w, h, 0, 0, inst, 0)
 	addTray()
@@ -537,6 +548,11 @@ func uiNotify(title, body, chat string) {
 	onUI(func() {
 		pendingChat = chat
 		balloon(title, body)
+		// Flashing a hidden window can restore it. A closed window stays
+		// closed; the tray balloon is the only signal.
+		if !userOpened {
+			return
+		}
 		if fg, _, _ := pGetForegroundWindow.Call(); fg != mainHwnd {
 			fi := flashInfo{Hwnd: mainHwnd, DwFlags: 0x2 | 0xC} // FLASHW_TRAY | FLASHW_TIMERNOFG
 			fi.CbSize = uint32(unsafe.Sizeof(fi))

@@ -214,6 +214,9 @@ func loadConfig() {
 	if cfg.DownloadDir == "" {
 		cfg.DownloadDir = defaultDownloadDir()
 	}
+	// Messages, file progress and updates never raise the window. It appears
+	// only when the user opens it.
+	cfg.ReopenOnMessage = false
 	saveConfigLocked()
 }
 

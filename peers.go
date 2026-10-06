@@ -46,7 +46,7 @@ func newPeerTable(path string) *PeerTable {
 		var list []*Peer
 		if json.Unmarshal(b, &list) == nil {
 			for _, p := range list {
-				if p.ID != "" {
+				if p.ID != "" && p.Version != "dev" {
 					p.Online = false
 					t.m[p.ID] = p
 				}
@@ -95,7 +95,7 @@ func (t *PeerTable) seen(info PeerInfo, ip, via string) bool {
 
 // learn adds a peer we only heard about from someone else (gossip).
 func (t *PeerTable) learn(p Peer) {
-	if p.ID == "" || p.ID == getCfg().ID || p.Addr == "" {
+	if p.ID == "" || p.ID == getCfg().ID || p.Addr == "" || p.Version == "dev" {
 		return
 	}
 	t.mu.Lock()

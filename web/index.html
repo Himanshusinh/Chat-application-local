@@ -60,7 +60,15 @@
     <section id="messages"></section>
     <div id="typing"></div>
 
+    <div id="editBar" hidden>
+      <span>Editing message</span>
+      <span class="spacer"></span>
+      <button type="button" class="btn small" id="editCancel">Cancel</button>
+    </div>
     <footer id="composer">
+      <button class="icon-btn" id="btnIncognito" title="Incognito — not saved on either computer" hidden>
+        <svg viewBox="0 0 24 24"><path d="M2.5 12c2.2-3.2 5.4-5 9.5-5s7.3 1.8 9.5 5c-2.2 3.2-5.4 5-9.5 5s-7.3-1.8-9.5-5Z"/><circle cx="12" cy="12" r="2.4" class="fill"/><path d="M4 20l16-16"/></svg>
+      </button>
       <button class="icon-btn" id="btnEmoji" title="Emoji">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M8 14.5s1.5 2 4 2 4-2 4-2"/><circle cx="9" cy="9.5" r=".8" class="fill"/><circle cx="15" cy="9.5" r=".8" class="fill"/></svg>
       </button>
@@ -105,6 +113,11 @@
     <h2>Settings</h2>
     <div class="row avatar-row">
       <label>Your picture</label>
+      <div id="avatarPreview"></div>
+      <span class="inline">
+        <button type="button" class="btn" id="btnAvatarPhoto">Choose photo</button>
+      </span>
+      <small>A photo is shown to everyone. Or pick an emoji below.</small>
       <div class="avatar-pick" id="avatarPick"></div>
     </div>
     <div class="row">Appearance
@@ -123,7 +136,6 @@
       <span class="inline"><input id="setDir"><button type="button" class="btn" id="btnOpenDir">Open</button></span>
     </label>
     <label class="check" id="autoStartRow"><input type="checkbox" id="setAutoStart"> Start OfficeChat automatically when I log in</label>
-    <label class="check"><input type="checkbox" id="setReopen"> Bring the window to the front when a message arrives</label>
 
     <h3>Connect to another network</h3>
     <p class="hint">Computers on the same Wi-Fi/LAN appear automatically. For another office, a VPN or the internet, type the other computer's address (for example <code>100.64.0.12</code> on Tailscale, or <code>203.0.113.5:45456</code>).</p>
@@ -153,6 +165,17 @@
 <input type="file" id="filePick" multiple hidden>
 <input type="file" id="folderPick" webkitdirectory multiple hidden>
 <input type="file" id="stickerPick" accept="image/png,image/gif,image/webp,image/jpeg" multiple hidden>
+<input type="file" id="avatarFile" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+
+<div id="msgMenu" class="msg-menu" hidden></div>
+<dialog id="forwardTo">
+  <form method="dialog" class="settings-form">
+    <h2>Forward message</h2>
+    <p class="hint" id="forwardHint"></p>
+    <div id="forwardList"></div>
+    <div class="settings-actions"><button value="cancel" class="btn">Cancel</button></div>
+  </form>
+</dialog>
 
 <script src="emoji.js"></script>
 <script src="stickers.js"></script>

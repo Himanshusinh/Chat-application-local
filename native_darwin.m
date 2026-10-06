@@ -242,7 +242,8 @@ void ocBadge(const char *label) {
 void ocNotify(const char *title, const char *body, const char *chat) {
   NSString *t = str(title), *b = str(body), *c = str(chat);
   dispatch_async(dispatch_get_main_queue(), ^{
-    [NSApp requestUserAttention:NSInformationalRequest];  // bounces the Dock icon once
+    // Bounce the Dock icon only. Do not order the window forward.
+    [NSApp requestUserAttention:NSInformationalRequest];
     if (!hasBundle()) return;
     UNMutableNotificationContent *content = [UNMutableNotificationContent new];
     content.title = t;

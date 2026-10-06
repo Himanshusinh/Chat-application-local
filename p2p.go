@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,8 +72,11 @@ func serveP2P(ln net.Listener) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/p2p/hello", p2pHello)
 	mux.HandleFunc("/p2p/msg", p2pMsg)
+	mux.HandleFunc("/p2p/edit", p2pEdit)
+	mux.HandleFunc("/p2p/delete", p2pDelete)
 	mux.HandleFunc("/p2p/typing", p2pTyping)
 	mux.HandleFunc("/p2p/read", p2pRead)
+	mux.HandleFunc("/p2p/avatar", p2pAvatar)
 	mux.HandleFunc("/p2p/chunk", p2pChunk)
 	mux.HandleFunc("/p2p/status", p2pStatus)
 	srv := &http.Server{
@@ -141,6 +145,10 @@ func p2pMsg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	touch(r)
+	if m.Incognito && m.To == "all" {
+		http.Error(w, "incognito is only for a direct chat", 400)
+		return
+	}
 	m.Chat = m.From
 	if m.To == "all" {
 		m.Chat = "all"
@@ -166,7 +174,6 @@ func p2pMsg(w http.ResponseWriter, r *http.Request) {
 			startRx(&m)
 		}
 		hub.broadcast(map[string]any{"type": "message", "msg": cloneMsg(&m)})
-		maybeReopenWindow()
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -174,6 +181,58 @@ func p2pMsg(w http.ResponseWriter, r *http.Request) {
 type typingMsg struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+}
+
+type editBody struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+func p2pEdit(w http.ResponseWriter, r *http.Request) {
+	var body editBody
+	if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body) != nil || body.ID == "" || strings.TrimSpace(body.Text) == "" {
+		http.Error(w, "bad edit", 400)
+		return
+	}
+	cur := store.get(body.ID)
+	if cur == nil {
+		writeJSON(w, map[string]bool{"ok": true})
+		return
+	}
+	if cur.From != r.Header.Get("X-OC-From") || cur.Kind != "text" {
+		http.Error(w, "cannot edit", 400)
+		return
+	}
+	if u := store.update(cur.Chat, body.ID, func(m *Message) {
+		m.Text = strings.TrimSpace(body.Text)
+		m.Edited = true
+	}); u != nil {
+		hub.broadcast(map[string]any{"type": "update", "msg": u})
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+type deleteBody struct {
+	ID string `json:"id"`
+}
+
+func p2pDelete(w http.ResponseWriter, r *http.Request) {
+	var body deleteBody
+	if json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body) != nil || body.ID == "" {
+		http.Error(w, "bad delete", 400)
+		return
+	}
+	cur := store.get(body.ID)
+	if cur == nil {
+		writeJSON(w, map[string]bool{"ok": true})
+		return
+	}
+	if cur.From != r.Header.Get("X-OC-From") {
+		http.Error(w, "cannot delete", 400)
+		return
+	}
+	dropMessage(cur, false)
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func p2pTyping(w http.ResponseWriter, r *http.Request) {
@@ -241,9 +300,20 @@ func p2pStatus(w http.ResponseWriter, r *http.Request) {
 
 // ------------------------------------------------------------ outgoing chat
 
-func sendMessage(to, text string, st *StickerRef) (*Message, error) {
+type outMsg struct {
+	Incognito bool
+	Forwarded bool
+}
+
+func sendMessage(to, text string, st *StickerRef, opt outMsg) (*Message, error) {
+	if opt.Incognito && to == "all" {
+		return nil, errors.New("incognito messages are only for a one-to-one chat")
+	}
 	c := getCfg()
-	m := &Message{ID: newID(), Chat: to, From: c.ID, FromName: c.Name, Avatar: c.Avatar, To: to, Text: text, Time: nowMs(), Kind: "text"}
+	m := &Message{
+		ID: newID(), Chat: to, From: c.ID, FromName: c.Name, Avatar: c.Avatar, To: to, Text: text, Time: nowMs(), Kind: "text",
+		Incognito: opt.Incognito, Forwarded: opt.Forwarded,
+	}
 	if st != nil {
 		if !st.valid() {
 			return nil, errors.New("unknown sticker")
@@ -254,6 +324,18 @@ func sendMessage(to, text string, st *StickerRef) (*Message, error) {
 			}
 		}
 		m.Kind, m.Text, m.Sticker = "sticker", "", &StickerRef{ID: st.ID, Ext: st.Ext}
+	}
+	if opt.Incognito {
+		p, ok := peers.get(to)
+		if !ok || !p.Online {
+			return nil, errors.New("they're offline — an incognito message is only delivered while they're online, and it is not saved")
+		}
+		if err := postJSON(p.Addr, "/p2p/msg", wireMsg(m)); err != nil {
+			return nil, errors.New("couldn't deliver the incognito message, so it was not kept")
+		}
+		m.Status = "sent"
+		store.add(m, false)
+		return m, nil
 	}
 	if to == "all" {
 		m.Status = "sent"
@@ -277,6 +359,143 @@ func sendMessage(to, text string, st *StickerRef) (*Message, error) {
 	return m, nil
 }
 
+func editMessage(id, text string) (*Message, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, errors.New("message is empty")
+	}
+	cur := store.get(id)
+	if cur == nil {
+		return nil, errors.New("message not found")
+	}
+	if cur.From != getCfg().ID {
+		return nil, errors.New("you can only edit your own messages")
+	}
+	if cur.Kind != "text" {
+		return nil, errors.New("only text messages can be edited")
+	}
+	prev := cur.Text
+	u := store.update(cur.Chat, id, func(m *Message) {
+		m.Text = text
+		m.Edited = true
+	})
+	if u == nil {
+		return nil, errors.New("message not found")
+	}
+	if err := deliverEdit(u); err != nil {
+		store.update(cur.Chat, id, func(m *Message) {
+			m.Text = prev
+			m.Edited = cur.Edited
+		})
+		return nil, err
+	}
+	return u, nil
+}
+
+func deliverEdit(m *Message) error {
+	body := editBody{ID: m.ID, Text: m.Text}
+	if m.Incognito {
+		p, ok := peers.get(m.To)
+		if !ok || !p.Online {
+			return errors.New("they're offline, so this incognito message can't be changed")
+		}
+		if err := postJSON(p.Addr, "/p2p/edit", body); err != nil {
+			return errors.New("couldn't update it on their computer")
+		}
+		return nil
+	}
+	if m.To == "all" {
+		for _, p := range peers.online() {
+			go postJSON(p.Addr, "/p2p/edit", body)
+		}
+		return nil
+	}
+	if m.Status == "pending" {
+		return nil // the queued copy already has the new text
+	}
+	if p, ok := peers.get(m.To); ok && p.Online {
+		go postJSON(p.Addr, "/p2p/edit", body)
+		return nil
+	}
+	store.queueOp(syncOp{Peer: m.To, Kind: "edit", ID: m.ID, Text: m.Text})
+	return nil
+}
+
+// deleteMessage removes a message. everyone is only allowed for your own
+// messages, and tells the other computers to drop it too.
+func deleteMessage(id string, everyone bool) error {
+	cur := store.get(id)
+	if cur == nil {
+		return nil
+	}
+	if everyone && cur.From != getCfg().ID {
+		return errors.New("you can only delete your own messages for everyone")
+	}
+	dropMessage(cur, everyone && cur.From == getCfg().ID)
+	return nil
+}
+
+// dropMessage removes cur locally. When tell is set, the other side is told
+// as well (immediately, or when they next come online).
+func dropMessage(cur *Message, tell bool) {
+	if cur.Kind == "files" && cur.Transfer != nil {
+		if t := getTransfer(cur.Transfer.ID); t != nil && (cur.Transfer.Status == "sending" || cur.Transfer.Status == "receiving" || cur.Transfer.Status == "") {
+			if t.outgoing && tell {
+				for _, id := range t.peers {
+					if p, ok := peers.get(id); ok {
+						go postJSON(p.Addr, "/p2p/status", statusMsg{TID: t.id, Status: "cancelled", Error: "cancelled"})
+					}
+				}
+			}
+			t.finish("cancelled", "cancelled")
+		}
+	}
+	if chat, ok := store.removeID(cur.ID); ok {
+		hub.broadcast(map[string]any{"type": "delete", "chat": chat, "id": cur.ID})
+	}
+	if !tell || cur.To == "" {
+		return
+	}
+	if cur.Incognito {
+		if p, ok := peers.get(cur.To); ok && p.Online {
+			go postJSON(p.Addr, "/p2p/delete", deleteBody{ID: cur.ID})
+		}
+		return
+	}
+	if cur.Status == "pending" {
+		return // it was never delivered
+	}
+	if cur.To == "all" {
+		body := deleteBody{ID: cur.ID}
+		for _, p := range peers.online() {
+			go postJSON(p.Addr, "/p2p/delete", body)
+		}
+		return
+	}
+	if p, ok := peers.get(cur.To); ok && p.Online {
+		go postJSON(p.Addr, "/p2p/delete", deleteBody{ID: cur.ID})
+		return
+	}
+	store.queueOp(syncOp{Peer: cur.To, Kind: "delete", ID: cur.ID})
+}
+
+func forwardMessage(id, to string, incognito bool) (*Message, error) {
+	cur := store.get(id)
+	if cur == nil {
+		return nil, errors.New("message not found")
+	}
+	if cur.Kind == "files" {
+		return nil, errors.New("files can't be forwarded — send the file again")
+	}
+	if cur.Kind == "sticker" {
+		return sendMessage(to, "", cur.Sticker, outMsg{Incognito: incognito, Forwarded: true})
+	}
+	if strings.TrimSpace(cur.Text) == "" {
+		return nil, errors.New("nothing to forward")
+	}
+	return sendMessage(to, cur.Text, nil, outMsg{Incognito: incognito, Forwarded: true})
+}
+
 var flushing sync.Map // peer ID -> struct{}
 
 // flushPending delivers queued direct messages, e.g. when someone comes back online.
@@ -298,6 +517,19 @@ func flushPending(peerID string) {
 			hub.broadcast(map[string]any{"type": "update", "msg": u})
 		}
 	}
+	for _, op := range store.takeOps(peerID) {
+		var err error
+		if op.Kind == "delete" {
+			err = postJSON(p.Addr, "/p2p/delete", deleteBody{ID: op.ID})
+		} else {
+			err = postJSON(p.Addr, "/p2p/edit", editBody{ID: op.ID, Text: op.Text})
+		}
+		if err != nil {
+			store.queueOp(syncOp{Peer: op.Peer, Kind: op.Kind, ID: op.ID, Text: op.Text})
+			logger.Printf("sync to %s: %v", p.Name, err)
+			return
+		}
+	}
 }
 
 func sendTyping(to string) {
@@ -317,24 +549,4 @@ func sendReadReceipt(peerID string) {
 	if p, ok := peers.get(peerID); ok && p.Online {
 		go postJSON(p.Addr, "/p2p/read", map[string]string{})
 	}
-}
-
-var (
-	reopenMu   sync.Mutex
-	lastReopen time.Time
-)
-
-// maybeReopenWindow brings the window back when a message arrives while it's
-// hidden, if the user switched that on in Settings.
-func maybeReopenWindow() {
-	if !getCfg().ReopenOnMessage || uiVisible() {
-		return
-	}
-	reopenMu.Lock()
-	defer reopenMu.Unlock()
-	if time.Since(lastReopen) < time.Minute {
-		return
-	}
-	lastReopen = time.Now()
-	go uiShow()
 }

@@ -123,12 +123,14 @@ svg .fill { fill: currentColor; stroke: none; }
   display: flex; align-items: center; justify-content: center;
   font-size: 22px; line-height: 1;
   background: var(--light);
+  overflow: hidden;
 }
 .avatar.group { background: var(--blue); color: var(--on-blue); }
 .avatar.group svg { width: 22px; height: 22px; }
 .avatar.small { width: 30px; height: 30px; font-size: 17px; }
+.avatar .av-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
 .avatar .dot {
-  position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  position: absolute; right: 0; bottom: 0; width: 12px; height: 12px; border-radius: 50%;
   background: var(--bg); border: 2px solid var(--faint);
 }
 .avatar .dot.on { background: var(--blue); border: 2px solid var(--bg); }
@@ -179,6 +181,40 @@ svg .fill { fill: currentColor; stroke: none; }
 .jumbo-2 { font-size: 48px; }
 .jumbo-3 { font-size: 36px; }
 .meta { font-size: 10.5px; color: var(--muted); margin: 2px 6px 0; display: flex; gap: 4px; align-items: center; }
+.edited { font-style: italic; }
+.fwd { font-size: 11px; color: var(--muted); font-style: italic; margin: 0 6px 2px; }
+.incog-tag { font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--blue); font-weight: 700; margin: 0 6px 2px; }
+.msg.incognito .bubble { background: transparent; color: var(--text); border: 1px dashed var(--line-strong); }
+.msg-more {
+  width: 22px; height: 18px; margin-left: 2px; border: 0; border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--muted); font-size: 16px; line-height: 1; padding: 0;
+}
+.msg-more:hover, .msg-more:focus { color: var(--blue); background: var(--light-2); }
+.msg-menu {
+  position: fixed; z-index: 40; min-width: 168px; padding: 4px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column;
+}
+.msg-menu[hidden] { display: none; }
+.msg-menu button {
+  border: 0; background: none; text-align: left; padding: 8px 12px; border-radius: 8px;
+  cursor: pointer; color: var(--text); font: inherit;
+}
+.msg-menu button:hover { background: var(--light); color: var(--blue); }
+#editBar {
+  display: flex; align-items: center; gap: 8px; margin: 0 12px; padding: 8px 12px;
+  border-radius: 12px 12px 0 0; background: var(--light); color: var(--blue); font-size: 13px; font-weight: 600;
+}
+#editBar[hidden], #btnIncognito[hidden] { display: none; }
+#forwardList { display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow: auto; }
+.fwd-item {
+  text-align: left; border: 0; background: var(--light-2); border-radius: 10px; padding: 8px 12px;
+  cursor: pointer; font: inherit; color: var(--text);
+}
+.fwd-item:hover { background: var(--light); color: var(--blue); }
+#meAvatar { cursor: pointer; }
+#avatarPreview { display: flex; align-items: center; gap: 10px; }
+#avatarPreview .avatar { width: 64px; height: 64px; font-size: 32px; }
 .tick-read { color: var(--blue); font-weight: 700; }
 .tick-pending { color: var(--muted); }
 

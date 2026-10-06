@@ -116,11 +116,22 @@ function emojiOnly(text) {
 }
 
 const GROUP_SVG = `<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 19c.6-3.3 3-5 6-5s5.4 1.7 6 5"/><circle cx="17" cy="9" r="2.4"/><path d="M16.5 14c2.4.2 4 1.7 4.5 4.5"/></svg>`;
+const isPhoto = (a) => typeof a === "string" && a.startsWith("img:");
+function avatarInner(id, emoji) {
+  if (isPhoto(emoji)) {
+    const who = id === (S.me && S.me.id) ? "me" : id;
+    return `<img class="av-img" alt="" src="/api/avatar?id=${encodeURIComponent(who)}&v=${encodeURIComponent(emoji)}&t=${TOKEN}">`;
+  }
+  // A photo tag or a stray hash must never be drawn as text.
+  if (!emoji || emoji.length > 8 || /img:|[0-9a-f]{6,}/i.test(emoji)) return "🙂";
+  return esc(emoji);
+}
 function avatarHTML(id, emoji, cls = "", online, elId = "") {
   const idAttr = elId ? ` id="${elId}"` : "";
-  if (id === "all") return `<div class="avatar group ${cls}"${idAttr}>${GROUP_SVG}</div>`;
+  const title = elId === "meAvatar" ? ` title="Change your picture"` : "";
+  if (id === "all") return `<div class="avatar group ${cls}"${idAttr}${title}>${GROUP_SVG}</div>`;
   const dot = online === undefined ? "" : `<span class="dot ${online ? "on" : ""}"></span>`;
-  return `<div class="avatar ${cls}"${idAttr}>${esc(emoji || "🙂")}${dot}</div>`;
+  return `<div class="avatar ${cls}"${idAttr}${title}>${avatarInner(id, emoji)}${dot}</div>`;
 }
 // Current name/picture of a person (live: follows renames instantly).
 function personName(id, fallback) { const p = S.peers.get(id); return (p && p.name) || fallback || "Someone"; }
@@ -189,6 +200,7 @@ function renderChatList() {
 let lastBadge = -1;
 function lastPreview(m) {
   const who = m.from === S.me.id ? "You: " : m.to === "all" ? personName(m.from, m.fromName).split(" ")[0] + ": " : "";
+  if (m.incognito) return who + "Incognito message";
   return who + (m.kind === "sticker" ? "Sticker" : m.text || "");
 }
 
@@ -247,8 +259,10 @@ function renderHeader() {
 
 // --------------------------------------------------------------- messages
 async function openChat(chat) {
+  if (chat !== S.active) { editing = null; input.value = ""; autosize(); }
   S.active = chat;
   $("app").classList.add("in-chat");
+  syncComposer();
   renderHeader();
   renderChatList();
   if (!S.msgs.has(chat)) {
@@ -258,6 +272,7 @@ async function openChat(chat) {
   }
   renderMessages();
   markRead();
+  syncComposer();
   $("input").focus();
 }
 
@@ -304,18 +319,22 @@ function msgHTML(m, prev) {
              : `<div class="bubble">${linkify(m.text || "")}</div>`;
   }
   let tick = "";
-  if (mine && m.to !== "all") {
+  if (mine && m.to !== "all" && !m.incognito) {
     tick = m.status === "read" ? `<span class="tick-read" title="Read">✓✓</span>`
          : m.status === "sent" ? `<span title="Delivered">✓✓</span>`
          : m.status === "pending" ? `<span class="tick-pending" title="Waiting – delivers when they're online">🕓</span>` : "";
   }
-  return out + `<div class="msg ${mine ? "mine" : ""} ${cont ? "cont" : ""}" data-id="${esc(m.id)}">
+  const tags = `${m.forwarded ? `<div class="fwd">Forwarded</div>` : ""}${m.incognito ? `<div class="incog-tag">Incognito · not saved</div>` : ""}`;
+  const edited = m.edited ? `<span class="edited">edited</span>` : "";
+  return out + `<div class="msg ${mine ? "mine" : ""} ${cont ? "cont" : ""} ${m.incognito ? "incognito" : ""}" data-id="${esc(m.id)}">
     ${avatar}
     <div class="msg-body">
       ${showSender ? `<div class="sender">${esc(personName(m.from, m.fromName))}</div>` : ""}
+      ${tags}
       ${body}
-      <div class="meta">${fmtTime(m.time)} ${tick}</div>
-    </div></div>`;
+      <div class="meta">${fmtTime(m.time)} ${edited} ${tick}<button class="msg-more" data-mid="${esc(m.id)}" title="Edit, forward or delete">⋯</button></div>
+    </div>
+  </div>`;
 }
 
 function fileCardHTML(m) {
@@ -385,15 +404,137 @@ $("messages").addEventListener("click", async (e) => {
     document.body.append(lb);
     return;
   }
+  const more = e.target.closest(".msg-more");
+  if (more) {
+    const m = (S.msgs.get(S.active) || []).find((x) => x.id === more.dataset.mid);
+    if (m) showMsgMenu(more.getBoundingClientRect(), m);
+    return;
+  }
   const b = e.target.closest("button[data-act]");
   if (!b) return;
   const tid = b.dataset.tid;
   try {
     if (b.dataset.act === "open") await api(`/api/open?tid=${encodeURIComponent(tid)}`, {});
     if (b.dataset.act === "reveal") await api(`/api/open?reveal=1&tid=${encodeURIComponent(tid)}`, {});
-    if (b.dataset.act === "cancel") cancelUpload(tid);
+    if (b.dataset.act === "cancel") { cancelUpload(tid); toast("Cancelled"); }
   } catch (err) { toast(err.message); }
 });
+
+function findMsg(id) {
+  for (const [chat, list] of S.msgs) {
+    const m = list.find((x) => x.id === id);
+    if (m) return m;
+  }
+  return null;
+}
+function showMsgMenu(box, m) {
+  const menu = $("msgMenu");
+  const mine = m.from === S.me.id;
+  const items = [];
+  if (mine && m.kind === "text") items.push(`<button type="button" data-do="edit">Edit</button>`);
+  if (m.kind !== "files") items.push(`<button type="button" data-do="forward">Forward</button>`);
+  items.push(`<button type="button" data-do="delete">Delete</button>`);
+  menu.innerHTML = items.join("");
+  menu.dataset.id = m.id;
+  menu.hidden = false;
+  menu.dataset.at = String(Date.now());
+  const w = 180;
+  let left = box.left, top = box.bottom + 4;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (top + 120 > window.innerHeight - 8) top = box.top - 4 - items.length * 36;
+  menu.style.left = Math.max(8, left) + "px";
+  menu.style.top = Math.max(8, top) + "px";
+}
+function hideMsgMenu() { $("msgMenu").hidden = true; }
+$("messages").addEventListener("contextmenu", (e) => {
+  const row = e.target.closest(".msg");
+  if (!row) return;
+  const m = findMsg(row.dataset.id);
+  if (!m) return;
+  e.preventDefault();
+  showMsgMenu({ left: e.clientX, top: e.clientY, bottom: e.clientY, right: e.clientX }, m);
+});
+$("msgMenu").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-do]");
+  if (!b) return;
+  const m = findMsg($("msgMenu").dataset.id);
+  hideMsgMenu();
+  if (!m) return;
+  if (b.dataset.do === "edit") {
+    editing = m.id;
+    input.value = m.text || "";
+    autosize();
+    syncComposer();
+    input.focus();
+    return;
+  }
+  if (b.dataset.do === "forward") { openForward(m); return; }
+  const mine = m.from === S.me.id;
+  const ask = mine ? "Delete this message for everyone?" : "Remove this message on this computer? The other person still has it.";
+  if (!confirm(ask)) return;
+  if (m.transfer && S.uploads.has(m.transfer.id)) cancelUpload(m.transfer.id);
+  try {
+    await api("/api/delete", { id: m.id, everyone: mine });
+    removeMessage(m.chat, m.id);
+  } catch (err) { toast(err.message); }
+});
+document.addEventListener("click", (e) => {
+  const at = Number($("msgMenu").dataset.at || 0);
+  if (Date.now() - at < 250) return;
+  if (!e.target.closest("#msgMenu") && !e.target.closest(".msg-more")) hideMsgMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideMsgMenu(); });
+
+let forwardID = null;
+function openForward(m) {
+  forwardID = m.id;
+  const incog = incognitoOn();
+  const people = [...S.peers.values()].sort((a, b) => a.name.localeCompare(b.name));
+  let html = "";
+  if (!incog) html += `<button type="button" class="fwd-item" data-to="all">Everyone</button>`;
+  html += people.map((p) => `<button type="button" class="fwd-item" data-to="${esc(p.id)}">${esc(p.name)}${p.online ? "" : " · offline"}</button>`).join("");
+  $("forwardHint").textContent = incog ? "Incognito is on, so the copy is not saved." : "Send a copy of this message.";
+  $("forwardList").innerHTML = html || `<p class="hint">Nobody else is here yet.</p>`;
+  $("forwardTo").showModal();
+}
+$("forwardList").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-to]");
+  if (!b || !forwardID) return;
+  try {
+    const m = await api("/api/forward", { id: forwardID, to: b.dataset.to, incognito: incognitoOn() && b.dataset.to !== "all" });
+    $("forwardTo").close();
+    addMessage(m);
+    renderChatList();
+    toast(m.chat === S.active ? "Forwarded" : `Forwarded to ${chatName(m.chat)}`);
+  } catch (err) { toast(err.message); }
+});
+
+function removeMessage(chat, id) {
+  const lists = [];
+  if (chat && S.msgs.has(chat)) lists.push([chat, S.msgs.get(chat)]);
+  else for (const entry of S.msgs) lists.push(entry);
+  for (const [c, list] of lists) {
+    const i = list.findIndex((x) => x.id === id);
+    if (i < 0) continue;
+    const m = list[i];
+    if (m.transfer && S.previews.has(m.transfer.id)) {
+      URL.revokeObjectURL(S.previews.get(m.transfer.id));
+      S.previews.delete(m.transfer.id);
+      S.progress.delete(m.transfer.id);
+    }
+    list.splice(i, 1);
+    if (S.chats[c]) {
+      const last = list[list.length - 1];
+      S.chats[c].last = last ? { ...last, transfer: undefined, text: last.incognito ? "" : last.kind === "files" && last.transfer ? "📎 " + last.transfer.name : last.text } : undefined;
+    }
+    if (c === S.active) {
+      const el = $("messages").querySelector(`.msg[data-id="${CSS.escape(id)}"]`);
+      if (el) el.remove();
+      if (!list.length) renderMessages();
+    }
+  }
+  renderChatList();
+}
 
 function rerenderMessage(m) {
   const list = S.msgs.get(m.chat);
@@ -413,7 +554,10 @@ function addMessage(m) {
   if (S.early.has(m.id)) { m = S.early.get(m.id); S.early.delete(m.id); }
   const list = S.msgs.get(m.chat);
   const chat = (S.chats[m.chat] ||= { unread: 0 });
-  const summary = { ...m, transfer: undefined, text: m.kind === "files" ? "📎 " + m.transfer.name : m.text };
+  const summary = {
+    ...m, transfer: undefined, sticker: undefined,
+    text: m.incognito ? "" : m.kind === "files" ? "📎 " + m.transfer.name : m.kind === "sticker" ? "Sticker" : m.text,
+  };
   chat.last = summary;
   if (list) {
     if (list.some((x) => x.id === m.id)) return false;
@@ -446,13 +590,45 @@ function notifyTyping() {
   api("/api/typing", { to: S.active }).catch(() => {});
 }
 
+let editing = null;
+function incognitoOn() { return !$("btnIncognito").hidden && $("btnIncognito").classList.contains("on"); }
+function syncComposer() {
+  const dm = S.active && S.active !== "all";
+  $("btnIncognito").hidden = !dm;
+  if (!dm) $("btnIncognito").classList.remove("on");
+  $("editBar").hidden = !editing;
+  input.placeholder = editing ? "Edit message" : incognitoOn() ? "Incognito message — not saved" : "Type a message";
+}
+$("btnIncognito").addEventListener("click", () => {
+  if (editing) return;
+  $("btnIncognito").classList.toggle("on");
+  syncComposer();
+});
+$("editCancel").addEventListener("click", () => { editing = null; input.value = ""; autosize(); syncComposer(); input.focus(); });
+
 async function sendText(text) {
   const t = text ?? input.value;
   if (!t.trim()) return;
+  if (editing) {
+    const id = editing;
+    try {
+      const m = await api("/api/edit", { id, text: t });
+      editing = null;
+      if (text === undefined) { input.value = ""; autosize(); }
+      syncComposer();
+      rerenderMessage(m);
+      const list = S.msgs.get(m.chat) || [];
+      if (list.length && list[list.length - 1].id === m.id && S.chats[m.chat]) {
+        S.chats[m.chat].last = { ...m, text: m.incognito ? "" : m.text };
+        renderChatList();
+      }
+    } catch (e) { toast(e.message); }
+    return;
+  }
   if (text === undefined) { input.value = ""; autosize(); }
   lastTyping = 0;
   try {
-    const m = await api("/api/send", { to: S.active, text: t });
+    const m = await api("/api/send", { to: S.active, text: t, incognito: incognitoOn() });
     addMessage(m);
     renderChatList();
   } catch (e) {
@@ -524,6 +700,10 @@ $("emojiGrid").addEventListener("click", (e) => {
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".panel") && !e.target.closest("#btnEmoji") && !e.target.closest("#btnSticker")) closePanels();
 });
+document.addEventListener("error", (e) => {
+  const img = e.target;
+  if (img && img.classList && img.classList.contains("av-img")) img.replaceWith(document.createTextNode("🙂"));
+}, true);
 
 // ---------------------------------------------------------------- stickers
 const BUILTIN = new Map((window.STICKERS || []).map(([id, e, cap]) => ["b:" + id, { e, cap }]));
@@ -553,7 +733,7 @@ async function loadStickers() { try { myStickers = await api("/api/stickers"); }
 async function sendSticker(st) {
   closePanels();
   try {
-    const m = await api("/api/send", { to: S.active, sticker: st });
+    const m = await api("/api/send", { to: S.active, sticker: st, incognito: incognitoOn() });
     addMessage(m);
     renderChatList();
   } catch (e) { toast(e.message); }
@@ -819,7 +999,7 @@ function notify(m) {
   ding();
   const name = personName(m.from, m.fromName);
   const title = m.to === "all" ? `${name} · Everyone` : name;
-  const body = m.kind === "files" ? `📎 ${m.transfer.name} (${fmtSize(m.transfer.total)})` : m.kind === "sticker" ? "Sent a sticker" : m.text;
+  const body = m.incognito ? "Incognito message" : m.kind === "files" ? `📎 ${m.transfer.name} (${fmtSize(m.transfer.total)})` : m.kind === "sticker" ? "Sent a sticker" : m.text;
   if (nativeSend({ type: "notify", title, body, chat: m.chat })) return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   const n = new Notification(title, { body, tag: m.chat, silent: true });
@@ -849,6 +1029,9 @@ function onEvent(ev) {
     case "update":
       S.progress.delete(ev.msg.transfer && ev.msg.transfer.id);
       rerenderMessage(ev.msg);
+      break;
+    case "delete":
+      removeMessage(ev.chat, ev.id);
       break;
     case "progress": {
       S.progress.set(ev.tid, ev);
@@ -920,7 +1103,6 @@ async function openSettings() {
   $("setName").value = s.name;
   $("setTeam").value = s.teamKey;
   $("setDir").value = s.downloadDir;
-  $("setReopen").checked = !!s.reopenOnMessage;
   $("setAutoStart").checked = !!st.autoStart;
   $("autoStartRow").hidden = !(st.os === "darwin" || st.os === "windows");
   pickedAvatar = s.avatar;
@@ -930,9 +1112,51 @@ async function openSettings() {
   $("settings").showModal();
 }
 function renderAvatarPick() {
-  const list = AVATARS.includes(pickedAvatar) ? AVATARS : [pickedAvatar, ...AVATARS];
+  const photo = isPhoto(pickedAvatar);
+  $("avatarPreview").innerHTML = photo ? `${avatarHTML(S.me.id, pickedAvatar, "", undefined, "")}<span class="hint">Photo</span>` : "";
+  const list = !photo && pickedAvatar && !AVATARS.includes(pickedAvatar) ? [pickedAvatar, ...AVATARS] : AVATARS;
   $("avatarPick").innerHTML = list.map((a) => `<button type="button" class="${a === pickedAvatar ? "on" : ""}">${a}</button>`).join("");
 }
+async function prepareAvatar(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("That file isn't a picture")); i.src = url; });
+    const scale = Math.min(1, 256 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.85));
+    if (!blob) throw new Error("Could not use that picture");
+    const buf = await blob.arrayBuffer();
+    let s = "";
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  } finally { URL.revokeObjectURL(url); }
+}
+async function uploadAvatar(file) {
+  const data = await prepareAvatar(file);
+  const st = await api("/api/avatar", { data });
+  S.me = st.me;
+  S.settings = st.settings;
+  pickedAvatar = st.me.avatar;
+  renderAvatarPick();
+  renderMe();
+  renderChatList();
+  if (S.msgs.has(S.active)) renderMessages();
+  toast("Picture updated");
+}
+$("btnAvatarPhoto").addEventListener("click", () => $("avatarFile").click());
+$("avatarFile").addEventListener("change", async (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  try { await uploadAvatar(f); } catch (err) { toast(err.message); }
+});
+document.querySelector("header.me").addEventListener("click", (e) => {
+  if (e.target.closest("#meAvatar")) $("avatarFile").click();
+});
 $("avatarPick").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   pickedAvatar = b.textContent; renderAvatarPick();
@@ -973,7 +1197,7 @@ $("btnSaveSettings").addEventListener("click", async () => {
   try {
     const st = await api("/api/settings", {
       name: $("setName").value, avatar: pickedAvatar, teamKey: $("setTeam").value,
-      downloadDir: $("setDir").value, reopenOnMessage: $("setReopen").checked, autoStart: $("setAutoStart").checked,
+      downloadDir: $("setDir").value, autoStart: $("setAutoStart").checked,
     });
     S.me = st.me; renderMe();
     $("settings").close();

@@ -316,6 +316,24 @@ func (t *Transfer) finish(status, errMsg string) {
 	}
 	transfersMu.Unlock()
 
+	if status == "cancelled" {
+		// A cancelled send should leave no message and no half-written files.
+		if !t.outgoing {
+			dl := getCfg().DownloadDir
+			for _, r := range roots {
+				_ = os.RemoveAll(filepath.Join(dl, r))
+			}
+		}
+		if _, ok := store.removeID(t.msgID); ok {
+			hub.broadcast(map[string]any{"type": "delete", "chat": t.chat, "id": t.msgID})
+		}
+		time.AfterFunc(30*time.Second, func() {
+			transfersMu.Lock()
+			delete(transfers, t.id)
+			transfersMu.Unlock()
+		})
+		return
+	}
 	done := t.done.Load()
 	if status == "done" {
 		done = t.total

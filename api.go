@@ -59,6 +59,10 @@ func serveUI(ln net.Listener) {
 		"/api/state":       apiState,
 		"/api/messages":    apiMessages,
 		"/api/send":        apiSend,
+		"/api/edit":        apiEdit,
+		"/api/delete":      apiDelete,
+		"/api/forward":     apiForward,
+		"/api/avatar":      apiAvatar,
 		"/api/typing":      apiTyping,
 		"/api/read":        apiRead,
 		"/api/clear":       apiClear,
@@ -218,15 +222,67 @@ func apiMessages(w http.ResponseWriter, r *http.Request) {
 
 func apiSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		To      string      `json:"to"`
-		Text    string      `json:"text"`
-		Sticker *StickerRef `json:"sticker"`
+		To        string      `json:"to"`
+		Text      string      `json:"text"`
+		Sticker   *StickerRef `json:"sticker"`
+		Incognito bool        `json:"incognito"`
 	}
 	if err := readJSON(r, &req); err != nil || (strings.TrimSpace(req.Text) == "" && req.Sticker == nil) || req.To == "" {
 		apiError(w, 400, errors.New("empty message"))
 		return
 	}
-	m, err := sendMessage(req.To, req.Text, req.Sticker)
+	m, err := sendMessage(req.To, req.Text, req.Sticker, outMsg{Incognito: req.Incognito})
+	if err != nil {
+		apiError(w, 400, err)
+		return
+	}
+	writeJSON(w, m)
+}
+
+func apiEdit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID   string `json:"id"`
+		Text string `json:"text"`
+	}
+	if err := readJSON(r, &req); err != nil || req.ID == "" {
+		apiError(w, 400, errors.New("missing message"))
+		return
+	}
+	m, err := editMessage(req.ID, req.Text)
+	if err != nil {
+		apiError(w, 400, err)
+		return
+	}
+	writeJSON(w, m)
+}
+
+func apiDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID       string `json:"id"`
+		Everyone bool   `json:"everyone"`
+	}
+	if err := readJSON(r, &req); err != nil || req.ID == "" {
+		apiError(w, 400, errors.New("missing message"))
+		return
+	}
+	if err := deleteMessage(req.ID, req.Everyone); err != nil {
+		apiError(w, 400, err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func apiForward(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID        string `json:"id"`
+		To        string `json:"to"`
+		Incognito bool   `json:"incognito"`
+	}
+	if err := readJSON(r, &req); err != nil || req.ID == "" || req.To == "" {
+		apiError(w, 400, errors.New("choose who to forward it to"))
+		return
+	}
+	m, err := forwardMessage(req.ID, req.To, req.Incognito)
 	if err != nil {
 		apiError(w, 400, err)
 		return
@@ -443,13 +499,12 @@ func apiFile(w http.ResponseWriter, r *http.Request) {
 
 func apiSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name            *string `json:"name"`
-		Avatar          *string `json:"avatar"`
-		TeamKey         *string `json:"teamKey"`
-		DownloadDir     *string `json:"downloadDir"`
-		ReopenOnMessage *bool   `json:"reopenOnMessage"`
-		AutoStart       *bool   `json:"autoStart"`
-		Theme           *string `json:"theme"`
+		Name        *string `json:"name"`
+		Avatar      *string `json:"avatar"`
+		TeamKey     *string `json:"teamKey"`
+		DownloadDir *string `json:"downloadDir"`
+		AutoStart   *bool   `json:"autoStart"`
+		Theme       *string `json:"theme"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		apiError(w, 400, err)
@@ -470,8 +525,9 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 		if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
 			c.Name = strings.TrimSpace(*req.Name)
 		}
-		if req.Avatar != nil && *req.Avatar != "" {
+		if req.Avatar != nil && *req.Avatar != "" && !isPhotoAvatar(*req.Avatar) {
 			c.Avatar = *req.Avatar
+			_ = os.Remove(avatarFile())
 		}
 		if req.TeamKey != nil && strings.TrimSpace(*req.TeamKey) != "" {
 			c.TeamKey = strings.TrimSpace(*req.TeamKey)
@@ -479,9 +535,7 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 		if req.DownloadDir != nil {
 			c.DownloadDir = *req.DownloadDir
 		}
-		if req.ReopenOnMessage != nil {
-			c.ReopenOnMessage = *req.ReopenOnMessage
-		}
+		c.ReopenOnMessage = false
 		if req.AutoStart != nil {
 			v := *req.AutoStart
 			c.AutoStart = &v
